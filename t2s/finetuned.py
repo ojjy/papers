@@ -32,7 +32,7 @@ def setup_environment():
     # 모델 로드 
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
-        device_map="gpu", 
+        device_map="auto", 
         trust_remote_code=True,
         torch_dtype=torch.float16, 
         attn_implementation="eager"  
@@ -148,15 +148,40 @@ def fine_tune_with_lora(model, tokenizer, training_data):
     return model
 
 # --- 5단계: 평가 (공식 스크립트 사용을 위해 수정) ---
-def evaluate_model(model, tokenizer, eval_dataset):
-    """튜닝된 모델의 예측 SQL을 파일로 저장합니다."""
+def evaluate_model(model, tokenizer, eval_dataset, max_samples=None):
+    """튜닝된 모델의 예측 SQL을 파일로 저장합니다.
+    
+    Args:
+        model: 평가할 모델
+        tokenizer: 토크나이저
+        eval_dataset: 평가 데이터셋
+        max_samples: 평가할 최대 샘플 수 (None이면 전체)
+    """
     print("모델 평가 시작 (예측 파일 생성)...")
+    
+    # CUDA 캐시 클리어 (메모리 정리)
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        print("CUDA 캐시 클리어 완료")
     
     predictions = []
     split_name = 'validation'
+    dataset = eval_dataset[split_name]
     
-    # 평가 데이터셋 전체를 순회하며 예측 생성
-    for example in eval_dataset[split_name]:
+    # 전체 개수 확인
+    total_samples = len(dataset) if max_samples is None else min(max_samples, len(dataset))
+    print(f"총 {len(dataset)}개 중 {total_samples}개 샘플을 평가합니다.")
+    print("진행 상황: (이 작업은 시간이 오래 걸릴 수 있습니다)")
+    
+    # 평가 데이터셋을 순회하며 예측 생성
+    for idx, example in enumerate(dataset):
+        if max_samples is not None and idx >= max_samples:
+            break
+            
+        # 진행 상황 출력 (10개마다)
+        if (idx + 1) % 10 == 0 or idx == 0:
+            print(f"  진행중... {idx + 1}/{total_samples} ({100*(idx+1)/total_samples:.1f}%)")
+        
         try:
             question = example['question']
             db_id = example['db_id']
@@ -185,16 +210,18 @@ def evaluate_model(model, tokenizer, eval_dataset):
             predictions.append(predicted_sql)
             
         except Exception as e:
-            print(f"에러 발생: {e}")
+            print(f"\n[경고] {idx+1}번째 샘플에서 에러 발생: {e}")
             predictions.append("SELECT 'Exception'")
             continue
 
+    print(f"\n평가 완료: {len(predictions)}개 예측 생성")
+    
     # 예측 결과를 pred.sql 파일에 저장
-    with open("pred.sql", "w") as f:
+    with open("pred.sql", "w", encoding='utf-8') as f:
         for sql in predictions:
             f.write(sql + "\n")
             
-    print("\n'pred.sql' 파일 생성 완료.")
+    print("'pred.sql' 파일 생성 완료.")
     print("이제 터미널에서 Spider 공식 평가 스크립트를 실행하세요.")
 
 # --- 메인 실행 로직 ---
@@ -215,4 +242,4 @@ if __name__ == '__main__':
     tuned_model = fine_tune_with_lora(model, tokenizer, instruction_dataset)
     
     # 5단계: 평가
-    evaluate_model(tuned_model, tokenizer, spider_dataset)
+    evaluate_model(tuned_model, tokenizer, spider_dataset, max_samples=50)
